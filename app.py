@@ -181,12 +181,10 @@ def get_fundamental_score(ticker: str) -> dict:
         if rev_g > 0.1:  score += 1; signals.append(f"✅ EPS 季增 {rev_g*100:.1f}%")
         elif rev_g < 0:  score -= 1; signals.append(f"❌ EPS 季減 {rev_g*100:.1f}%")
         else:            signals.append(f"➖ EPS 持平（{rev_g*100:.1f}%）")
-
     return {
         "score":  score,
         "pe":     pe,
-        "detail": "
-".join(signals) if signals else "基本面資料不足",
+        "detail": "\n".join(signals) if signals else "基本面資料不足",
     }
 
 
