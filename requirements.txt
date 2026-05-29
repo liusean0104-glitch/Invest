@@ -1,0 +1,8 @@
+streamlit
+yfinance
+google-generativeai
+requests
+supabase
+apscheduler
+python-dotenv
+pandas
