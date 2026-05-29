@@ -126,34 +126,69 @@ def get_technical_score(ticker: str) -> dict:
     }
 
 def get_fundamental_score(ticker: str) -> dict:
-    info  = yf.Ticker(ticker).info
-    pe    = info.get("trailingPE")
-    dy    = info.get("dividendYield") or 0
-    eps_g = info.get("earningsGrowth")
-    rev_g = info.get("revenueGrowth")
-
+    """
+    用 TWSE 證交所 API 抓台股基本面，避免 yfinance rate limit。
+    ticker 格式: "2330.TW" -> stock_id: "2330"
+    """
+    stock_id = ticker.replace(".TW", "").replace(".TWO", "")
+    pe, dy, rev_g = None, 0, None
     score, signals = 0, []
+    headers = {"User-Agent": "Mozilla/5.0"}
 
+    # PE、殖利率：TWSE 個股本益比
+    try:
+        url = f"https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d?stockNo={stock_id}&response=json"
+        r = requests.get(url, headers=headers, timeout=10)
+        rows = r.json().get("data", [])
+        if rows:
+            latest = rows[-1]
+            try:   dy = float(latest[1]) / 100
+            except: dy = 0
+            try:   pe = float(latest[3])
+            except: pe = None
+    except Exception as e:
+        signals.append(f"➖ TWSE 抓取失敗：{e}")
+
+    # EPS 季增率：TWSE 每季 EPS
+    try:
+        url2 = f"https://www.twse.com.tw/rwd/zh/finance/t163sb04?stockNo={stock_id}&response=json"
+        r2 = requests.get(url2, headers=headers, timeout=10)
+        rows2 = r2.json().get("data", [])
+        if len(rows2) >= 2:
+            eps_now  = float(rows2[-1][1])
+            eps_prev = float(rows2[-2][1])
+            if eps_prev != 0:
+                rev_g = (eps_now - eps_prev) / abs(eps_prev)
+    except Exception:
+        pass
+
+    # 評分
     if pe:
         if pe < 15:   score += 1; signals.append(f"✅ PE 偏低（{pe:.1f}x）")
         elif pe > 30: score -= 1; signals.append(f"❌ PE 偏高（{pe:.1f}x）")
         else:         signals.append(f"➖ PE 合理（{pe:.1f}x）")
+    else:
+        signals.append("➖ PE 無資料")
+
     if dy > 0.05:
-        score += 1;   signals.append(f"✅ 殖利率高（{dy*100:.1f}%）")
+        score += 1; signals.append(f"✅ 殖利率高（{dy*100:.1f}%）")
     elif dy > 0.02:
         signals.append(f"➖ 殖利率普通（{dy*100:.1f}%）")
-    if eps_g:
-        if eps_g > 0.1:  score += 1; signals.append(f"✅ EPS 成長 {eps_g*100:.1f}%")
-        elif eps_g < 0:  score -= 1; signals.append(f"❌ EPS 衰退 {eps_g*100:.1f}%")
-    if rev_g:
-        if rev_g > 0.1:  score += 1; signals.append(f"✅ 營收成長 {rev_g*100:.1f}%")
-        elif rev_g < 0:  score -= 1; signals.append(f"❌ 營收衰退 {rev_g*100:.1f}%")
+    else:
+        signals.append("➖ 殖利率無資料")
+
+    if rev_g is not None:
+        if rev_g > 0.1:  score += 1; signals.append(f"✅ EPS 季增 {rev_g*100:.1f}%")
+        elif rev_g < 0:  score -= 1; signals.append(f"❌ EPS 季減 {rev_g*100:.1f}%")
+        else:            signals.append(f"➖ EPS 持平（{rev_g*100:.1f}%）")
 
     return {
         "score":  score,
         "pe":     pe,
-        "detail": "\n".join(signals) if signals else "基本面資料不足",
+        "detail": "
+".join(signals) if signals else "基本面資料不足",
     }
+
 
 def get_news_summary(ticker: str, name: str) -> str:
     items = []
