@@ -1,6 +1,6 @@
 streamlit
 yfinance
-google-generativeai
+google-genai
 requests
 supabase
 apscheduler

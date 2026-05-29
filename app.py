@@ -10,7 +10,8 @@ from datetime import datetime, timedelta
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 from supabase import create_client
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
@@ -23,9 +24,7 @@ NEWS_API_KEY    = os.getenv("NEWS_API_KEY")
 SUPABASE_URL    = os.getenv("SUPABASE_URL")
 SUPABASE_KEY    = os.getenv("SUPABASE_ANON_KEY")
 
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_search_model = genai.GenerativeModel("gemini-2.0-flash", tools="google_search")
-gemini_judge_model  = genai.GenerativeModel("gemini-2.0-flash")
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -173,9 +172,15 @@ def get_news_summary(ticker: str, name: str) -> str:
         items.append(f"[NewsAPI 錯誤] {e}")
 
     try:
-        resp = gemini_search_model.generate_content(
-            f"用繁體中文，搜尋近7天影響台灣股市或{name}({ticker})的重大事件"
-            f"（地緣政治、Fed政策、半導體產業、台灣經濟數據等），列出最重要3條，每條一句話。"
+        resp = gemini_client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=(
+                f"用繁體中文，搜尋近7天影響台灣股市或{name}({ticker})的重大事件"
+                f"（地緣政治、Fed政策、半導體產業、台灣經濟數據等），列出最重要3條，每條一句話。"
+            ),
+            config=genai_types.GenerateContentConfig(
+                tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())]
+            ),
         )
         items.append(f"[宏觀事件]\n{resp.text}")
     except Exception as e:
@@ -200,7 +205,10 @@ def get_gemini_signal(ticker, name, tech, fund, news) -> dict:
 請輸出以下 JSON，不要有任何 markdown 包裝：
 {{"signal":"BUY"或"HOLD"或"SELL","confidence":"高"或"中"或"低","reason":"繁體中文判斷理由含新聞影響，100字內","risk":"主要風險，50字內"}}
 """
-    resp = gemini_judge_model.generate_content(prompt)
+    resp = gemini_client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+    )
     try:
         raw = resp.text.strip().strip("```json").strip("```").strip()
         return json.loads(raw)
