@@ -193,7 +193,7 @@ def get_news_summary(ticker, name):
 
     try:
         resp = gemini_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-1.5-flash",
             contents=(
                 f"用繁體中文，搜尋近7天影響台灣股市或{name}({ticker})的重大事件"
                 f"（地緣政治、Fed政策、半導體產業、台灣經濟數據等），列出最重要3條，每條一句話。"
@@ -225,7 +225,7 @@ def get_gemini_signal(ticker, name, tech, fund, news):
     )
     try:
         resp = gemini_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-1.5-flash",
             contents=prompt,
         )
         raw = resp.text.strip().strip("```json").strip("```").strip()
