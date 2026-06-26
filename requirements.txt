@@ -6,3 +6,4 @@ supabase
 apscheduler
 python-dotenv
 pandas
+numpy
