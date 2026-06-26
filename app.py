@@ -16,6 +16,13 @@ from supabase import create_client
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
+from financials import get_financial_quality, auto_dcf_inputs
+try:
+    from dcf_engine import DCFModel, DCFAssumptions
+    _DCF_OK = True
+except Exception:
+    _DCF_OK = False
+
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -209,7 +216,13 @@ def get_news_summary(ticker, name):
     return "\n".join(items)
 
 # ── Gemini 判斷 ───────────────────────────────────────────────
-def get_gemini_signal(ticker, name, tech, fund, news):
+def get_gemini_signal(ticker, name, tech, fund, news, finq=None):
+    finq_block = ""
+    if finq and finq.get("detail"):
+        finq_block = (
+            f"## 財報品質佐證（評分 {finq.get('score', 0)}）\n"
+            f"{finq['detail']}\n\n"
+        )
     prompt = (
         f"你是專業台股分析師。根據以下資料判斷今日 {name}（{ticker}）的操作建議。\n\n"
         f"## 技術面（評分 {tech['score']}）\n"
@@ -217,11 +230,14 @@ def get_gemini_signal(ticker, name, tech, fund, news):
         f"{tech['detail']}\n\n"
         f"## 基本面（評分 {fund['score']}）\n"
         f"{fund['detail']}\n\n"
+        f"{finq_block}"
         f"## 市場新聞（近7天）\n"
         f"{news}\n\n"
+        f"判斷時請特別重視財報品質佐證（ROIC、現金流轉換率、毛利率趨勢），"
+        f"技術面僅作進出場時機參考。\n"
         f"請輸出以下 JSON，不要有任何 markdown 包裝：\n"
         '{{"signal":"BUY"或"HOLD"或"SELL","confidence":"高"或"中"或"低",'
-        '"reason":"繁體中文判斷理由含新聞影響，100字內","risk":"主要風險，50字內"}}'
+        '"reason":"繁體中文判斷理由，需引用財報佐證與新聞影響，100字內","risk":"主要風險，50字內"}}'
     )
     try:
         resp = gemini_client.models.generate_content(
@@ -244,8 +260,13 @@ def get_gemini_signal(ticker, name, tech, fund, news):
 def run_analysis(ticker, name):
     tech   = get_technical_score(ticker)
     fund   = get_fundamental_score(ticker)
+    finq   = get_financial_quality(ticker)
     news   = get_news_summary(ticker, name)
-    result = get_gemini_signal(ticker, name, tech, fund, news)
+    result = get_gemini_signal(ticker, name, tech, fund, news, finq)
+    # 把財報佐證併入 fund_detail 一起儲存（不改 DB schema）
+    merged_fund_detail = fund.get("detail", "")
+    if finq.get("detail"):
+        merged_fund_detail += f"\n\n— 財報品質（評分 {finq.get('score',0)}）—\n{finq['detail']}"
     row = {
         "ticker":       ticker,
         "stock_name":   name,
@@ -255,9 +276,9 @@ def run_analysis(ticker, name):
         "risk":         result.get("risk", ""),
         "price":        tech.get("price"),
         "tech_score":   tech.get("score"),
-        "fund_score":   fund.get("score"),
+        "fund_score":   fund.get("score", 0) + finq.get("score", 0),
         "tech_detail":  tech.get("detail"),
-        "fund_detail":  fund.get("detail"),
+        "fund_detail":  merged_fund_detail,
         "news_summary": news[:1000],
     }
     db_save_signal(row)
@@ -313,7 +334,7 @@ with st.sidebar:
 st.title("📈 台股買賣訊號系統")
 st.caption(f"更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
-tab1, tab2, tab3 = st.tabs(["🎯 今日訊號", "🔍 手動分析", "📜 歷史紀錄"])
+tab1, tab2, tab3, tab4 = st.tabs(["🎯 今日訊號", "🔍 手動分析", "💰 DCF 估值", "📜 歷史紀錄"])
 
 # Tab1
 with tab1:
@@ -381,11 +402,19 @@ with tab2:
                     fund = get_fundamental_score(stock["ticker"])
                     st.write(f"基本面評分 {fund['score']}")
 
+                    st.write("📑 抓取財報品質（ROIC / FCF / 毛利率）...")
+                    finq = get_financial_quality(stock["ticker"])
+                    st.write(f"財報品質評分 {finq.get('score', 0)}")
+
                     st.write("📰 抓取市場新聞...")
                     news = get_news_summary(stock["ticker"], stock["name"])
 
                     st.write("🤖 Gemini 綜合判斷中...")
-                    result = get_gemini_signal(stock["ticker"], stock["name"], tech, fund, news)
+                    result = get_gemini_signal(stock["ticker"], stock["name"], tech, fund, news, finq)
+
+                    merged_fund_detail = fund.get("detail", "")
+                    if finq.get("detail"):
+                        merged_fund_detail += f"\n\n— 財報品質（評分 {finq.get('score',0)}）—\n{finq['detail']}"
 
                     db_save_signal({
                         "ticker":       stock["ticker"],
@@ -396,9 +425,9 @@ with tab2:
                         "risk":         result.get("risk", ""),
                         "price":        tech.get("price"),
                         "tech_score":   tech.get("score"),
-                        "fund_score":   fund.get("score"),
+                        "fund_score":   fund.get("score", 0) + finq.get("score", 0),
                         "tech_detail":  tech.get("detail"),
-                        "fund_detail":  fund.get("detail"),
+                        "fund_detail":  merged_fund_detail,
                         "news_summary": news[:1000],
                     })
                     sig_emoji = {"BUY": "🟢", "HOLD": "🟡", "SELL": "🔴"}.get(result["signal"], "⚪")
@@ -410,8 +439,119 @@ with tab2:
             time.sleep(1)
             st.rerun()
 
-# Tab3
+# Tab3 — DCF 估值
 with tab3:
+    st.subheader("💰 DCF 內在價值估算")
+    st.caption("用無槓桿自由現金流(FCFF)模型估算合理股價，並與現價比較安全邊際。")
+
+    if not _DCF_OK:
+        st.error("找不到 dcf_engine.py，請確認該檔案已放在 repo 根目錄（與 app.py 同層）。")
+    else:
+        watchlist = db_get_watchlist()
+        if not watchlist:
+            st.warning("請先在左側新增追蹤股票。")
+        else:
+            opts = {f"{s['name']} ({s['ticker']})": s for s in watchlist}
+            sel  = opts[st.selectbox("選擇股票", list(opts.keys()), key="dcf_sel")]
+
+            if "dcf_auto" not in st.session_state:
+                st.session_state.dcf_auto = {}
+
+            if st.button("📥 從財報自動帶入基期假設", use_container_width=True):
+                with st.spinner("抓取財報中..."):
+                    auto = auto_dcf_inputs(sel["ticker"])
+                if auto:
+                    st.session_state.dcf_auto = auto
+                    st.success("已帶入最近一年財報數據，可在下方微調。")
+                else:
+                    st.warning("財報抓取失敗（可能 API 限流），請手動輸入。")
+
+            auto = st.session_state.dcf_auto
+            st.divider()
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**基期假設（單位：元，可手動覆寫）**")
+                base_rev = st.number_input("最近一年營收", value=float(auto.get("base_revenue", 5000.0)),
+                                           step=1000.0, format="%.0f")
+                ebit_m   = st.number_input("EBIT margin", value=float(auto.get("ebit_margin", 0.15)),
+                                           step=0.01, format="%.3f")
+                tax_r    = st.number_input("稅率", value=float(auto.get("tax_rate", 0.20)),
+                                           step=0.01, format="%.3f")
+                da_p     = st.number_input("D&A 佔營收 %", value=float(auto.get("da_pct", 0.05)),
+                                           step=0.01, format="%.3f")
+                cx_p     = st.number_input("CapEx 佔營收 %", value=float(auto.get("capex_pct", 0.06)),
+                                           step=0.01, format="%.3f")
+                nwc_p    = st.number_input("NWC 佔營收 %", value=float(auto.get("nwc_pct", 0.10)),
+                                           step=0.01, format="%.3f")
+            with col2:
+                st.markdown("**預測與折現假設**")
+                growth_str = st.text_input("各年營收成長率（逗號分隔）", value="0.12,0.10,0.08,0.06,0.05")
+                wacc_in    = st.number_input("WACC 折現率", value=0.10, step=0.005, format="%.3f")
+                tg         = st.number_input("永續成長率 g", value=0.025, step=0.005, format="%.3f")
+                net_debt   = st.number_input("淨負債（總負債−現金）",
+                                             value=float(auto.get("net_debt", 0.0)), step=1000.0, format="%.0f")
+                shares     = st.number_input("流通股數", value=1000.0, step=1000.0, format="%.0f")
+                method     = st.selectbox("終值方法", ["gordon", "exit_multiple"])
+                exit_mult  = st.number_input("Exit EV/EBITDA（僅 exit 法用）", value=12.0, step=0.5)
+                mid_year   = st.checkbox("期中折現慣例", value=False)
+
+            if st.button("🚀 計算內在價值", type="primary", use_container_width=True):
+                try:
+                    growth = [float(x.strip()) for x in growth_str.split(",") if x.strip()]
+                    a = DCFAssumptions(
+                        base_revenue=base_rev,
+                        revenue_growth=growth,
+                        ebit_margin=ebit_m,
+                        tax_rate=tax_r,
+                        da_pct_revenue=da_p,
+                        capex_pct_revenue=cx_p,
+                        nwc_pct_revenue=nwc_p,
+                        wacc=wacc_in,
+                        terminal_growth=tg,
+                        net_debt=net_debt,
+                        shares_outstanding=shares,
+                        forecast_years=len(growth),
+                        exit_ev_ebitda=exit_mult,
+                        mid_year_convention=mid_year,
+                    )
+                    model = DCFModel(a)
+                    val = model.value(method)
+
+                    # 現價
+                    tech = get_technical_score(sel["ticker"])
+                    price = tech.get("price")
+                    fair  = val["Value_per_Share"]
+
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("每股內在價值", f"{fair:,.1f} 元")
+                    m2.metric("現價", f"{price:,.1f} 元" if price else "–")
+                    if price:
+                        mos = (fair - price) / price
+                        m3.metric("安全邊際", f"{mos*100:+.1f}%",
+                                  delta="低估" if mos > 0 else "高估")
+
+                    tv_pct = val["TV_pct_of_EV"]
+                    st.caption(f"企業價值 {val['Enterprise_Value']:,.0f} ｜ 終值佔 EV {tv_pct*100:.0f}%"
+                               + ("（>80% 表示估值高度依賴終值假設，須謹慎）" if tv_pct > 0.8 else ""))
+
+                    st.markdown("**現金流預測**")
+                    st.dataframe(
+                        model.proj[["Revenue", "EBIT", "NOPAT", "FCFF", "PV_FCFF"]].round(1),
+                        use_container_width=True,
+                    )
+
+                    st.markdown("**敏感度分析：每股價值（WACC × g）**")
+                    import numpy as np
+                    wgrid = np.arange(wacc_in - 0.01, wacc_in + 0.011, 0.005)
+                    ggrid = np.arange(tg - 0.01, tg + 0.011, 0.005)
+                    st.dataframe(model.sensitivity(wgrid, ggrid, "gordon").round(1),
+                                 use_container_width=True)
+                except Exception as e:
+                    st.error(f"計算失敗：{e}")
+
+# Tab4 — 歷史紀錄
+with tab4:
     st.subheader("歷史訊號紀錄")
     days    = st.slider("顯示最近幾天", 1, 90, 30)
     history = db_get_signals(days=days)
