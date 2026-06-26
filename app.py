@@ -225,7 +225,7 @@ def get_gemini_signal(ticker, name, tech, fund, news):
     )
     try:
         resp = gemini_client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash",
             contents=prompt,
         )
         raw = resp.text.strip().strip("```json").strip("```").strip()
